@@ -1627,6 +1627,180 @@ namespace Zircon.Server.Models
                         ChangeLevel(parts);
                         break;
 
+                    case "装备升级":
+                    case "REFINEUP":
+                        // Adds one level's worth of experience to an equipped item (weapon / necklace / bracelets / rings)
+                        if (!GameMaster) return;
+
+                        if (parts.Length < 2)
+                        {
+                            Connection.ReceiveChat("用法: @装备升级 武器|项链|左手镯|右手镯|左戒指|右戒指 [目标角色]", MessageType.System);
+                            return;
+                        }
+
+                        // determine target player (optional third parameter allowed for Admin+)
+                        PlayerObject targetPlayer = this;
+                        if (parts.Length >= 3 && Character.Account.Identify >= AccountIdentity.Admin)
+                        {
+                            var _tmp = SEnvir.GetPlayerByCharacter(parts[2]);
+                            if (_tmp == null)
+                            {
+                                Connection.ReceiveChat($"找不到在线玩家：{parts[2]}", MessageType.System);
+                                return;
+                            }
+                            targetPlayer = _tmp;
+                        }
+
+                        string slotName = parts[1];
+                        EquipmentSlot eqSlot;
+
+                        switch (slotName.ToUpper())
+                        {
+                            case "武器":
+                            case "WEAPON":
+                                eqSlot = EquipmentSlot.Weapon;
+                                break;
+                            case "项链":
+                            case "NECKLACE":
+                                eqSlot = EquipmentSlot.Necklace;
+                                break;
+                            case "左手镯":
+                            case "LEFTBRACELET":
+                            case "BRACELETL":
+                                eqSlot = EquipmentSlot.BraceletL;
+                                break;
+                            case "右手镯":
+                            case "RIGHTBRACELET":
+                            case "BRACELETR":
+                                eqSlot = EquipmentSlot.BraceletR;
+                                break;
+                            case "左戒指":
+                            case "左戒":
+                            case "LEFTRING":
+                            case "RINGL":
+                                eqSlot = EquipmentSlot.RingL;
+                                break;
+                            case "右戒指":
+                            case "右戒":
+                            case "RIGHTRING":
+                            case "RINGR":
+                                eqSlot = EquipmentSlot.RingR;
+                                break;
+                            default:
+                                Connection.ReceiveChat("无效的插槽，请使用: 武器|项链|左手镯|右手镯|左戒指|右戒指", MessageType.System);
+                                return;
+                        }
+
+                        UserItem targetItem = targetPlayer.Equipment[(int)eqSlot];
+
+                        if (targetItem == null)
+                        {
+                            Connection.ReceiveChat("目标插槽没有装备。", MessageType.System);
+                            return;
+                        }
+
+                        // Choose proper experience table based on slot (weapon vs accessory)
+                        bool isWeaponSlot = eqSlot == EquipmentSlot.Weapon;
+
+                        var expList = isWeaponSlot ? Globals.WeaponExperienceList : Globals.AccessoryExperienceList;
+
+                        if (targetItem.Level >= expList.Count)
+                        {
+                            Connection.ReceiveChat("该装备已达到最大等级。", MessageType.System);
+                            return;
+                        }
+
+                        decimal required = expList[targetItem.Level];
+                        decimal delta = required - targetItem.Experience;
+
+                        if (delta <= 0) // already at/over threshold, give a full next-level worth
+                            delta = required;
+
+                        targetItem.Experience += delta;
+
+                        // Apply same leveling rules as existing flows
+                        if (isWeaponSlot)
+                        {
+                            int limit_level = SEnvir.GetWeaponLimitLevel(targetItem.Info.Rarity);
+
+                            if (targetItem.Experience >= Globals.WeaponExperienceList[targetItem.Level])
+                            {
+                                targetItem.Experience = 0;
+                                targetItem.Level++;
+
+                                if (targetItem.Level <= limit_level)
+                                    targetItem.Flags |= UserItemFlags.Refinable;
+                            }
+                        }
+                        else
+                        {
+                            if (targetItem.Experience >= Globals.AccessoryExperienceList[targetItem.Level])
+                            {
+                                targetItem.Experience -= Globals.AccessoryExperienceList[targetItem.Level];
+                                targetItem.Level++;
+
+                                targetItem.Flags |= UserItemFlags.Refinable;
+                            }
+                        }
+
+                        // Notify clients
+                        CellLinkInfo link = new CellLinkInfo { GridType = GridType.Equipment, Slot = (int)eqSlot };
+                        targetPlayer.Enqueue(new S.ItemExperience { Target = link, Experience = targetItem.Experience, Level = targetItem.Level, Flags = targetItem.Flags });
+
+                        // 刷新
+                        if (targetPlayer.Companion != null) targetPlayer.Companion.RefreshWeight();
+                        targetPlayer.RefreshWeight();
+
+                        SEnvir.Log($"[装备升级] 管理员=[{Character.Account.EMailAddress}-{Character.CharacterName}] 目标=[{targetPlayer.Name}] 插槽=[{eqSlot}] 增加经验={delta}");
+
+                        Connection.ReceiveChat($"已为 {targetPlayer.Name} 的 {slotName} 增加经验 {delta}", MessageType.System);
+                        if (targetPlayer != this && targetPlayer.Connection != null)
+                            targetPlayer.Connection.ReceiveChat($"管理员为你的装备增加了经验 ({slotName})", MessageType.System);
+
+                        break;
+
+                    case "召唤升级":
+                    case "SUMMONUP":
+                        // GM command: increase the current summoned monster's SummonLevel by 1
+                        if (!GameMaster) return;
+
+                        PlayerObject targetPlayer2 = this;
+                        if (parts.Length >= 2 && Character.Account.Identify >= AccountIdentity.Admin)
+                        {
+                            var _tmp = SEnvir.GetPlayerByCharacter(parts[1]);
+                            if (_tmp == null)
+                            {
+                                Connection.ReceiveChat($"找不到在线玩家：{parts[1]}", MessageType.System);
+                                return;
+                            }
+                            targetPlayer2 = _tmp;
+                        }
+
+                        if (targetPlayer2.Pets == null || targetPlayer2.Pets.Count == 0)
+                        {
+                            Connection.ReceiveChat("目标没有召唤的怪物。", MessageType.System);
+                            return;
+                        }
+
+                        MonsterObject pet = targetPlayer2.Pets[0];
+                        var oldColour = pet.NameColour;
+                        int oldLevel = pet.SummonLevel;
+
+                        pet.SummonLevel++;
+                        pet.RefreshStats();
+                        pet.ProcessNameColour();
+
+                        if (oldColour != pet.NameColour)
+                            pet.Broadcast(new S.ObjectNameColour { ObjectID = pet.ObjectID, Colour = pet.NameColour });
+
+                        Connection.ReceiveChat($"已将 {targetPlayer2.Name} 的召唤怪升级 {oldLevel} -> {pet.SummonLevel}", MessageType.System);
+                        if (targetPlayer2 != this && targetPlayer2.Connection != null)
+                            targetPlayer2.Connection.ReceiveChat($"管理员将你的召唤怪升级 {oldLevel} -> {pet.SummonLevel}", MessageType.System);
+
+                        SEnvir.Log($"[召唤升级] 管理员=[{Character.Account.EMailAddress}-{Character.CharacterName}] 目标=[{targetPlayer2.Name}] 升级={oldLevel}->{pet.SummonLevel}");
+
+                        break;
+
                     case "传送":
                     case "GOTO":
                         if (Character.Account.Identify == AccountIdentity.Normal) return;
@@ -12419,7 +12593,11 @@ namespace Zircon.Server.Models
             info.MaxChance = maxChance;
             info.Quality = p.RefineQuality;
             info.Type = p.RefineType;
-            info.RetrieveTime = SEnvir.Now + Globals.RefineTimes[p.RefineQuality];
+            // GM精炼速度加快
+            if (Character?.Account != null && Character.Account.Identify >= AccountIdentity.Supervisor)
+                info.RetrieveTime = SEnvir.Now + TimeSpan.FromSeconds(1);
+            else
+                info.RetrieveTime = SEnvir.Now + Globals.RefineTimes[p.RefineQuality];
 
             result.Success = true;
             SendShapeUpdate();
